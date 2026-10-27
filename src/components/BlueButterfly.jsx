@@ -438,10 +438,17 @@ export default function BlueButterfly({
   const onBurstRef = useRef(onBurst)
   const burstRef = useRef(0)
   const gatherRef = useRef(0)
+  const enterAt = useRef(0)
   const pointerRef = useRef({ x: 0, y: 0, active: false })
   const [alive, setAlive] = useState(false)
   const [burst, setBurst] = useState(false)
   const [returning, setReturning] = useState(false)
+  const [reduceMotion] = useState(() => (
+    typeof window !== 'undefined'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  ))
+  const [flightDir] = useState(() => (Math.random() < 0.5 ? -1 : 1))
+  const [entering, setEntering] = useState(!reduceMotion)
   pointerRef.current.active = reactToPointer
 
   useEffect(() => {
@@ -451,6 +458,20 @@ export default function BlueButterfly({
   useEffect(() => {
     onBurstRef.current = onBurst
   }, [onBurst])
+
+  useEffect(() => {
+    if (!entering) return undefined
+    enterAt.current = performance.now()
+    const node = rootRef.current
+    const timer = window.setTimeout(() => {
+      if (node) {
+        node.style.transform = ''
+        node.style.opacity = ''
+      }
+      setEntering(false)
+    }, 7000)
+    return () => window.clearTimeout(timer)
+  }, [entering])
 
   useEffect(() => {
     burstRef.current = 0
@@ -481,8 +502,10 @@ export default function BlueButterfly({
     let ended = false
     let aliveSet = false
     let cancelled = false
-    let yaw = 0.42
-    let pitch = 0.12
+    let yaw = entering ? 0.02 : 0.42
+    let pitch = entering ? 0.02 : 0.12
+    let flightSettled = false
+    const flightFrom = flightDir
     burstRef.current = 0
     let dust = null
 
@@ -501,6 +524,12 @@ export default function BlueButterfly({
 
       const elapsed = startedAt == null ? 0 : now - startedAt
       const time = now / 1000
+      const flyingIn = startedAt == null && !reduce
+      const flightT = flyingIn && enterAt.current ? clamp01((now - enterAt.current) / 5600) : 0
+      const phase = flightT * 5.6 * Math.PI * 2 * 1.22
+      const beat = Math.sin(phase)
+      const glideU = clamp01((flightT - 0.86) / 0.14)
+      const glide = glideU * glideU * (3 - 2 * glideU)
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.clearRect(0, 0, canvas.width, canvas.height)
       ctx.setTransform(canvas.width / VIEW_W, 0, 0, canvas.height / VIEW_H, 0, 0)
@@ -522,19 +551,46 @@ export default function BlueButterfly({
         burstT = clamp01((now - burstRef.current) / (reduce ? 1 : 1300))
       }
       const pointer = pointerRef.current
-      const aimYaw = Math.max(-0.42, Math.min(0.5,
-        0.16 + Math.sin(time * 0.35) * 0.1 + (pointer.active ? pointer.x * 0.36 : 0),
-      ))
-      const aimPitch = Math.max(-0.22, Math.min(0.26,
-        0.06 + Math.sin(time * 0.3) * 0.04 + (pointer.active ? pointer.y * -0.22 : 0),
-      ))
-      const turn = reduce ? 1 : 0.07
+      const aimYaw = flyingIn
+        ? flightFrom * -0.04 * (1 - flightT)
+        : Math.max(-0.42, Math.min(0.5,
+          0.16 + Math.sin(time * 0.35) * 0.1 + (pointer.active ? pointer.x * 0.36 : 0),
+        ))
+      const aimPitch = flyingIn
+        ? 0.02
+        : Math.max(-0.22, Math.min(0.26,
+          0.06 + Math.sin(time * 0.3) * 0.04 + (pointer.active ? pointer.y * -0.22 : 0),
+        ))
+      const turn = reduce ? 1 : flyingIn ? 0.14 : 0.07
       yaw += (aimYaw - yaw) * turn
       pitch += (aimPitch - pitch) * turn
 
+      if (flyingIn && rootRef.current && !flightSettled) {
+        const along = flightT < 0.16
+          ? (flightT / 0.16) * 0.38
+          : flightT < 0.8
+            ? 0.38 + (flightT - 0.16) / 0.64 * 0.44
+            : 0.82 + (1 - (1 - (flightT - 0.8) / 0.2) ** 2) * 0.18
+        const box = rootRef.current.offsetWidth || size
+        const off = window.innerWidth * 0.5 + box * 0.56
+        const x = (1 - along) * flightFrom * off
+        const path = Math.sin(flightT * Math.PI * 2) * 48 + Math.sin(flightT * Math.PI) * -20
+        const bob = path * (1 - glide * 0.65) - beat * 16 * (1 - glide)
+        const bank = flightFrom * (1 - along) * -7 + Math.cos(flightT * Math.PI * 2) * 8 + beat * 2.5
+        rootRef.current.style.opacity = String(clamp01(flightT / 0.05))
+        rootRef.current.style.transform = `translate3d(${x}px, ${bob}px, 0) rotate(${bank}deg)`
+        if (flightT >= 1) {
+          flightSettled = true
+          rootRef.current.style.transform = ''
+          rootRef.current.style.opacity = ''
+          if (!cancelled) setEntering(false)
+        }
+      }
+
       const core = project(BODY_X, BODY_Y, 24, pitch, yaw)
       const pulse = 0.55 + Math.sin(time * 2.2) * 0.08
-      const glowStrength = (reduce ? 0.28 : 0.55 * (1 - formed) + 0.22) * (1 - burstT)
+      const glowFade = burstT < 0.4 ? 1 : 1 - (burstT - 0.4) / 0.6
+      const glowStrength = (reduce ? 0.28 : 0.55 * (1 - formed) + 0.22) * glowFade
       const glowRadius = (78 + formed * 46) * core.persp * (1 + burstT * 2.2)
       const glow = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, glowRadius)
       glow.addColorStop(0, `rgba(236,248,255,${0.45 * glowStrength})`)
@@ -550,9 +606,10 @@ export default function BlueButterfly({
       parts.forEach((particle) => {
         const travel = reduce ? 1 : clamp01((elapsed - HOLD - particle.delay) / TRAVEL)
         const open = easeOutBack(travel)
-        let x = particle.closedX + (particle.hx - particle.closedX) * open
-        let y = particle.closedY + (particle.hy - particle.closedY) * open
-        if (particle.kind === 'antenna' && travel > 0.8) {
+        const span = flyingIn ? 1 - glide : open
+        let x = particle.closedX + (particle.hx - particle.closedX) * span
+        let y = particle.closedY + (particle.hy - particle.closedY) * span
+        if (particle.kind === 'antenna' && !flyingIn && travel > 0.8) {
           const sway = Math.sin(time * 1.35) * 6 * particle.wing
           x += sway * clamp01((200 - particle.hy) / 90)
         }
@@ -562,7 +619,11 @@ export default function BlueButterfly({
         const sinceOpen = elapsed - HOLD - particle.delay - TRAVEL
         const flapMix = reduce ? 1 : clamp01(sinceOpen / 420)
         const foldScale = particle.kind === 'body' ? 0 : particle.kind === 'antenna' ? 0.3 : 1
-        const fold = ((1 - clamp01(open)) * 1.05 + Math.sin(time * 1.7) * 0.16 * flapMix) * foldScale
+        const flightFold = (0.52 - beat * 0.36) * (1 - glide) + 1.05 * glide
+        const fold = (flyingIn
+          ? flightFold
+          : (1 - clamp01(open)) * 1.05 + Math.sin(time * 1.7) * 0.16 * flapMix
+        ) * foldScale
         const lx = x - BODY_X
         const camber = particle.kind === 'body' ? 6 : 0
         const angle = particle.wing * fold
@@ -592,7 +653,7 @@ export default function BlueButterfly({
           const dist = (36 + mag * 2.8) * ease
           particle.px += (dx / mag) * dist
           particle.py += (dy / mag) * dist
-          particle.ps *= 0.7 + ease * 1.8
+          particle.ps *= 1 + ease * 1.15
           particle.pa *= fade
         })
         if (!dust) {
@@ -699,6 +760,8 @@ export default function BlueButterfly({
     let observer
     if (reduce) {
       begin()
+    } else if (entering) {
+      frame = requestAnimationFrame(loop)
     } else if (bloomWhenVisible) {
       frame = requestAnimationFrame(loop)
       observer = new IntersectionObserver(
@@ -722,8 +785,12 @@ export default function BlueButterfly({
       cancelled = true
       cancelAnimationFrame(frame)
       observer?.disconnect()
+      if (rootRef.current) {
+        rootRef.current.style.transform = ''
+        rootRef.current.style.opacity = ''
+      }
     }
-  }, [autoBloom, bloomWhenVisible, replayToken, showParticles])
+  }, [autoBloom, bloomWhenVisible, entering, flightDir, replayToken, showParticles, size])
 
   const onPointerMove = (event) => {
     if (!reactToPointer || !rootRef.current) return
@@ -738,7 +805,7 @@ export default function BlueButterfly({
   }
 
   const ignite = () => {
-    if (!alive || burstRef.current || decorative) return
+    if (!alive || burstRef.current || decorative || entering) return
     burstRef.current = performance.now()
     setBurst(true)
     onBurstRef.current?.()
@@ -747,7 +814,7 @@ export default function BlueButterfly({
   return (
     <div
       ref={rootRef}
-      className={`bb ${alive ? 'alive' : ''} ${burst ? 'burst' : ''} ${returning ? 'returning' : ''} ${className}`.trim()}
+      className={`bb ${entering ? 'entering' : ''} ${alive ? 'alive' : ''} ${burst ? 'burst' : ''} ${returning ? 'returning' : ''} ${className}`.trim()}
       style={{ width: size }}
       role={decorative ? undefined : 'button'}
       tabIndex={decorative ? undefined : 0}

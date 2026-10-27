@@ -36,6 +36,11 @@
   display: block;
 }
 
+.bb.entering {
+  z-index: 4;
+  pointer-events: none;
+}
+
 .bb.alive:not(.burst) {
   cursor: pointer;
 }
